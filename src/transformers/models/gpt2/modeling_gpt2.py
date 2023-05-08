@@ -345,15 +345,17 @@ class GPT2MLP(nn.Module):
     def __init__(self, intermediate_size, config):
         super().__init__()
         embed_dim = config.hidden_size
-        self.c_fc = Conv1D(intermediate_size, embed_dim)
+        # dawei: two vectors here, one for gate, one for up
+        self.c_fc = Conv1D(intermediate_size * 2, embed_dim)
         self.c_proj = Conv1D(embed_dim, intermediate_size)
         self.act = ACT2FN[config.activation_function]
         self.dropout = nn.Dropout(config.resid_pdrop)
 
     def forward(self, hidden_states: Optional[Tuple[torch.FloatTensor]]) -> torch.FloatTensor:
         hidden_states = self.c_fc(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.c_proj(hidden_states)
+        out_gate, out_up = torch.chunk(hidden_states, 2, dim=-1)
+        hidden_states = self.c_proj(self.act(out_gate) * out_up)
+        # TODO: check if we need dropout
         hidden_states = self.dropout(hidden_states)
         return hidden_states
 

@@ -138,8 +138,8 @@ def add_transformers_checkpoint_args(parser):
 megatron_to_transformers = {
     "attention.dense": ".attn.c_proj.",
     "self_attention.dense": ".attn.c_proj.",
-    "mlp.dense_h_to_4h": ".mlp.c_fc.",
-    "mlp.dense_4h_to_h": ".mlp.c_proj.",
+    "mlp.dense_h_to_4h": ".mlp.c_fc.",              # dawei: gate_proj and up_proj in llama
+    "mlp.dense_4h_to_h": ".mlp.c_proj.",            # dawei: c_proj in llama
 }
 transformers_to_megatron = {v[1:-1]: k for k, v in megatron_to_transformers.items()}
 
@@ -346,7 +346,10 @@ def convert_checkpoint_from_megatron_to_transformers(args):
 
     # Create Transformers GPT2 config from Megatron-LM arguments
     if megatron_args is not None:
-        if megatron_args.bias_gelu_fusion:
+        # dawei: use swish as activation function
+        if megatron_args.swiglu:
+            activation_function = "silu"
+        elif megatron_args.bias_gelu_fusion:
             activation_function = "gelu_fast"
         elif megatron_args.openai_gelu:
             activation_function = "gelu_new"
@@ -360,7 +363,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
         if getattr(megatron_args, "orig_vocab_size", None) is None
         else megatron_args.orig_vocab_size
     )
-    print(vocab_size)
+    print("vocab size:", vocab_size)
 
     config = GPT2Config(
         vocab_size=vocab_size,
@@ -453,6 +456,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
             # The index of the layer.
             layer_idx = int(m.group(1)) + pp_rank * num_layers
             # The name of the operation.
+            # dawei: input_layernorm, self_attention, mlp, post_attention_layernorm
             op_name = m.group(2)
             # Is it a weight or a bias?
             weight_or_bias = m.group(3)
@@ -461,9 +465,16 @@ def convert_checkpoint_from_megatron_to_transformers(args):
             layer_name = f"transformer.h.{layer_idx}"
 
             if op_name + "." + weight_or_bias not in tensor_parallel_params:
+                # dawei: input_layernorm.weight, input_layernorm.bias, self_attention.dense.bias,
+                # dawei: self_attention_layernorm.weight, self_attention_layernorm.bias, mlp.dense_4h_to_h.bias
+                # dawei: post_attention_layernorm.weight, post_attention_layernorm.bias
                 params = val.to(dtype)
             else:
+                # dawei: self_attention.query_key_value.weight, self_attention_query_value.bias, self_attention.dense.weight,
+                #  mlp.dense_h_to_4h.weight, mlp.dense_h_to_4h.bias,
+                #  mlp.dense_4h_to_h.weight
                 dim = 1 if op_name in ["self_attention.dense", "mlp.dense_4h_to_h", "attention.dense"] else 0
+                # dawei: maybe only stored in the first chunk
                 params = torch.cat(
                     [val]
                     + [
@@ -475,6 +486,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
 
             # For layernorm(s), simply store the layer norm.
             if op_name.endswith("layernorm"):
+                # dawei: input_layernorm & post_attention_layernorm
                 ln_name = "ln_1" if op_name.startswith("input") else "ln_2"
                 output_state_dict[layer_name + "." + ln_name + "." + weight_or_bias] = params
 
@@ -482,12 +494,15 @@ def convert_checkpoint_from_megatron_to_transformers(args):
             elif (
                 op_name == "attention.query_key_value" or op_name == "self_attention.query_key_value"
             ) and weight_or_bias == "weight":
+                # dawei: (gpt2) self_attention.query_key_value.weight
+                # TODO: why insert a tensor of 1x1xDxD bias?
                 # Insert a tensor of 1x1xDxD bias.
                 causal_mask = torch.tril(torch.ones((n_positions, n_positions), dtype=dtype)).view(
                     1, 1, n_positions, n_positions
                 )
                 output_state_dict[layer_name + ".attn.bias"] = causal_mask
 
+                # TODO: maybe we don't need
                 # Insert a "dummy" tensor for masked_bias.
                 masked_bias = torch.tensor(-1e4, dtype=dtype)
                 output_state_dict[layer_name + ".attn.masked_bias"] = masked_bias
@@ -508,6 +523,7 @@ def convert_checkpoint_from_megatron_to_transformers(args):
             elif (
                 op_name == "attention.query_key_value" or op_name == "self_attention.query_key_value"
             ) and weight_or_bias == "bias":
+                # dawei: (gpt2) self_attention.query_key_value.bias
                 out_val = megatron_to_transformers_fix_query_key_value_ordering(
                     params, checkpoint_version, 3, heads, hidden_size_per_head
                 )
@@ -516,11 +532,13 @@ def convert_checkpoint_from_megatron_to_transformers(args):
 
             # Transpose the weights.
             elif weight_or_bias == "weight":
+                # dawei: self_attention.dense.weight, mlp.dense_h_to_4h.weight, mlp.dense_4h_to_h.weight
                 out_name = megatron_to_transformers[op_name]
                 output_state_dict[layer_name + out_name + "weight"] = params.transpose(0, 1)
 
             # Copy the bias.
             elif weight_or_bias == "bias":
+                # dawei: (gpt2) self_attention.query_key_value.bias
                 out_name = megatron_to_transformers[op_name]
                 output_state_dict[layer_name + out_name + "bias"] = params
 
