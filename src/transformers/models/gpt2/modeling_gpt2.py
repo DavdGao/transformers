@@ -125,6 +125,52 @@ def load_tf_weights_in_gpt2(model, config, gpt2_checkpoint_path):
     return model
 
 
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        if importlib.util.find_spec('einops') is None:
+            raise RuntimeError("einops is required for Rotary Embedding")
+
+    def forward(self, max_seq_len, offset=0):
+        seq = torch.arange(max_seq_len, device=self.inv_freq.device) + offset
+        freqs = einsum('i , j -> i j', seq.type_as(self.inv_freq), self.inv_freq)
+        # first part even vector components, second part odd vector components,
+        #  2 * dim in dimension size
+        emb = torch.cat((freqs, freqs), dim=-1)
+        # emb [seq_length, .., dim]
+        from einops import rearrange
+        return rearrange(emb, 'n d -> n 1 1 d')
+
+
+def _rotate_half(x):
+    """
+    change sign so the last dimension becomes [-odd, +even]
+    """
+    from einops import rearrange
+    x = rearrange(x, '... (j d) -> ... j d', j=2)
+    x1, x2 = x.unbind(dim=-2)
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(t, freqs):
+    """
+    input tensor t is of shape [seq_length, ..., dim]
+    rotary positional embeding tensor freqs is of shape [seq_length, ..., dim]
+    check https://kexue.fm/archives/8265 for detailed formulas
+    """
+    rot_dim = freqs.shape[-1]
+    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+
+    # first part is cosine component
+    # second part is sine component, need to change signs with _rotate_half method
+    t = (t * freqs.cos()) + (_rotate_half(t) * freqs.sin())
+    return torch.cat((t, t_pass), dim=-1)
+
+
+
 class GPT2Attention(nn.Module):
     def __init__(self, config, is_cross_attention=False, layer_idx=None):
         super().__init__()
@@ -167,6 +213,13 @@ class GPT2Attention(nn.Module):
         self.resid_dropout = nn.Dropout(config.resid_pdrop)
 
         self.pruned_heads = set()
+
+        # TODO: check if it's right
+        self.seq_length = config.n_positions
+        # TODO: more elegant way, not hard code
+        rotary_dim = 128
+        self.rotary_pos_emb = RotaryEmbedding(rotary_dim)
+        self.rotary_pos_emb = self.rotary_pos_emb(self.seq_length)
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -313,11 +366,31 @@ class GPT2Attention(nn.Module):
             key, value = self.c_attn(encoder_hidden_states).split(self.split_size, dim=2)
             attention_mask = encoder_attention_mask
         else:
+            # dawei: this way
             query, key, value = self.c_attn(hidden_states).split(self.split_size, dim=2)
 
+        # dawei: (batch, head, seq_length, head_features)
+        #  (batch, num_head, seq_length, head_dim)
         query = self._split_heads(query, self.num_heads, self.head_dim)
         key = self._split_heads(key, self.num_heads, self.head_dim)
         value = self._split_heads(value, self.num_heads, self.head_dim)
+
+        # dawei: line 200 in modeling_llama.py
+
+        # dawei: add for rotary position embedding
+        rotary_pos_emb = self.rotary_pos_emb
+        if isinstance(rotary_pos_emb, tuple):
+            rotary_pos_emb = rotary_pos_emb
+        else:
+            rotary_pos_emb = ((rotary_pos_emb,) * 2)
+
+        q_pos_emb, k_pos_emb = rotary_pos_emb
+        # TODO: require [sq, batch, num_heads, head_dim]
+        #  current [batch, num_heads, sq, head_dim]
+        #  output [sq, batch, num_heads, head_dim]
+
+        query = apply_rotary_pos_emb(query.transpose(2, 0, 1, 3), q_pos_emb).transpose(1, 2, 0, 3)
+        key = apply_rotary_pos_emb(key.transpose(2, 0, 1, 3), k_pos_emb).transpose(1, 2, 0, 3)
 
         if layer_past is not None:
             past_key, past_value = layer_past
