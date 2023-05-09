@@ -382,7 +382,7 @@ class MixedFusedLayerNorm(torch.nn.Module):
         init.zeros_(self.bias)
 
     def forward(self, input):
-        return FusedRMSNormAffineFunction.apply(input, weight, self.normalized_shape, self.eps)
+        return FusedRMSNormAffineFunction.apply(input, self.weight, self.normalized_shape, self.eps)
 
 
 class GPT2Block(nn.Module):
