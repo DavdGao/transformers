@@ -220,7 +220,7 @@ class GPT2Attention(nn.Module):
         # TODO: more elegant way, not hard code
         rotary_dim = 128
         self.rotary_pos_emb = RotaryEmbedding(rotary_dim)
-        self.rotary_pos_emb = self.rotary_pos_emb(self.seq_length)
+
 
     def prune_heads(self, heads):
         if len(heads) == 0:
@@ -379,7 +379,7 @@ class GPT2Attention(nn.Module):
         # dawei: line 200 in modeling_llama.py
 
         # dawei: add for rotary position embedding
-        rotary_pos_emb = self.rotary_pos_emb
+        rotary_pos_emb = self.rotary_pos_emb(self.seq_length)
         if isinstance(rotary_pos_emb, tuple):
             rotary_pos_emb = rotary_pos_emb
         else:
