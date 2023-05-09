@@ -27,6 +27,8 @@ from torch import nn
 from torch.cuda.amp import autocast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
+from apex.normalization.fused_layer_norm import FusedRMSNormAffineFunction
+
 from ...activations import ACT2FN
 from ...modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
@@ -360,15 +362,36 @@ class GPT2MLP(nn.Module):
         return hidden_states
 
 
+class MixedFusedLayerNorm(torch.nn.Module):
+    def __init__(self, normalized_shape, eps=1e-5):
+        super(MixedFusedLayerNorm, self).__init__()
+
+        if isinstance(normalized_shape, numbers.Integral):
+            normalized_shape = (normalized_shape,)
+        self.normalized_shape = torch.Size(normalized_shape)
+        self.eps = eps
+
+        self.weight = Parameter(torch.Tensor(*normalized_shape))
+        self.bias = Parameter(torch.Tensor(*normalized_shape))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        init.ones_(self.weight)
+        init.zeros_(self.bias)
+
+    def forward(self, input):
+        return FusedRMSNormAffineFunction.apply(input, weight, self.normalized_shape, self.eps)
+
+
 class GPT2Block(nn.Module):
     def __init__(self, config, layer_idx=None):
         super().__init__()
         hidden_size = config.hidden_size
         inner_dim = config.n_inner if config.n_inner is not None else 4 * hidden_size
 
-        self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_1 = MixedFusedLayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.attn = GPT2Attention(config, layer_idx=layer_idx)
-        self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
+        self.ln_2 = MixedFusedLayerNorm(hidden_size, eps=config.layer_norm_epsilon)
 
         if config.add_cross_attention:
             self.crossattention = GPT2Attention(config, is_cross_attention=True, layer_idx=layer_idx)
