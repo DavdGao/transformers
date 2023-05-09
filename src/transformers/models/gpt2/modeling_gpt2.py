@@ -390,8 +390,8 @@ class GPT2Attention(nn.Module):
         #  current [batch, num_heads, sq, head_dim]
         #  output [sq, batch, num_heads, head_dim]
 
-        query = apply_rotary_pos_emb(query.transpose(2, 0, 1, 3), q_pos_emb).transpose(1, 2, 0, 3)
-        key = apply_rotary_pos_emb(key.transpose(2, 0, 1, 3), k_pos_emb).transpose(1, 2, 0, 3)
+        query = apply_rotary_pos_emb(query.permute(2, 0, 1, 3), q_pos_emb).permute(1, 2, 0, 3)
+        key = apply_rotary_pos_emb(key.permute(2, 0, 1, 3), k_pos_emb).permute(1, 2, 0, 3)
 
         if layer_past is not None:
             past_key, past_value = layer_past
