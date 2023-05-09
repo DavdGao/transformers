@@ -27,6 +27,7 @@ import torch.utils.checkpoint
 from torch import nn
 from torch.cuda.amp import autocast
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+from torch.nn.parameter import Parameter
 
 from apex.normalization.fused_layer_norm import FusedRMSNormAffineFunction
 
